@@ -117,7 +117,7 @@ def page_doctor_stats():
 
     # Export to Excel
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         exp.to_excel(writer, "All", index=False)
         for doc in sorted(exp["practice"].dropna().unique()):
             sheet = safe_sheet_name(doc)
@@ -372,7 +372,7 @@ def to_excel_with_sheets(df: pd.DataFrame, file_name="refer_summary.xlsx"):
     แปลง DataFrame เป็นไฟล์ Excel แบบมีชีต All + แยกตาม practice
     """
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         # ชีต All
         df.to_excel(writer, sheet_name="All", index=False)
 
