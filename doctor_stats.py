@@ -42,6 +42,27 @@ def safe_sheet_name(name: str) -> str:
     for ch in ['\\', '/', '*', '?', ':', '[', ']']:
         safe = safe.replace(ch, '-')
     return safe or "Unknown"
+def safe_json_loads(v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    if isinstance(v, (list, dict)):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return json.loads(s)
+        except Exception:
+            return None
+    return None
+
+def join_list(v, sep=","):
+    if v is None:
+        return ""
+    if isinstance(v, list):
+        return sep.join([str(x) for x in v if x is not None and str(x).strip() != ""])
+    return str(v)
 
 # =========================
 # PAGE 1 – Doctor Monthly Stats
@@ -448,6 +469,239 @@ def page_refer_summary():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="dl_refer_excel"
     )
+# =========================
+# PAGE 4 – Patient Summary Clean Export
+# 
+# =========================
+def beautify_patient_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    รับ df raw จาก Patient_summary CSV แล้วคืน df ที่แตกคอลัมน์ให้อ่านง่าย + filter ง่าย
+    """
+    # field หลักที่คุณต้องการ
+    base_cols = [
+        "HN","VN","visit_type","patientTitle","patientName","patientAge","nationality",
+        "branch","insurance_name","assist_insurance","concessionType",
+        "diagnosis","medLog","treatments","payment_status","billLog","rejects","retry","note"
+    ]
+    # เอาเฉพาะคอลัมน์ที่มีจริง (กันไฟล์บางเวอร์ชันไม่ครบ)
+    keep = [c for c in base_cols if c in df.columns]
+    out = df[keep].copy()
+
+    # ---------- diagnosis ----------
+    # diagnosis = list of dict
+    diag_count = []
+    diag_codes = []
+    diag_titles = []
+    diag_code_1, diag_code_2, diag_code_3 = [], [], []
+    diag_title_1, diag_title_2, diag_title_3 = [], [], []
+
+    # ---------- treatments ----------
+    # treatments = list of dict (ส่วนใหญ่ list ยาว 1)
+    treat_count = []
+    treatment_name = []
+    treatment_area = []
+    treatment_unit = []
+    order_list = []
+    practice_list = []
+    asst_list = []
+    order_count = []
+    practice_count = []
+    asst_count = []
+
+    # ---------- payment_status ----------
+    # payment_status = list of dict (ส่วนใหญ่ list ยาว 1), ภายในหลาย field เป็น list ยาว 1 อีกที
+    pay_status = []
+    pay_invoice_id = []
+    pay_total_invoiced = []
+    pay_case_type = []
+    pay_reason_not_insurance = []
+
+    # ---------- rejects ----------
+    has_reject = []
+    reject_type = []
+    reject_reason = []
+    reject_problem = []
+
+    # ---------- logs ----------
+    medlog_list, medlog_count = [], []
+    billlog_list, billlog_count = [], []
+    retry_list, retry_count = [], []
+
+    for _, r in out.iterrows():
+        # diagnosis
+        diag = safe_json_loads(r.get("diagnosis"))
+        if isinstance(diag, list):
+            diag_items = [x for x in diag if isinstance(x, dict)]
+        else:
+            diag_items = []
+
+        diag_count.append(len(diag_items))
+        codes = [str(x.get("code","")).strip() for x in diag_items if str(x.get("code","")).strip()]
+        titles = [str(x.get("title","")).strip() for x in diag_items if str(x.get("title","")).strip()]
+        diag_codes.append(",".join(codes))
+        diag_titles.append(",".join(titles))
+
+        def pick(arr, i):
+            return arr[i] if i < len(arr) else ""
+
+        diag_code_1.append(pick(codes, 0))
+        diag_code_2.append(pick(codes, 1))
+        diag_code_3.append(pick(codes, 2))
+        diag_title_1.append(pick(titles, 0))
+        diag_title_2.append(pick(titles, 1))
+        diag_title_3.append(pick(titles, 2))
+
+        # treatments
+        tr = safe_json_loads(r.get("treatments"))
+        tr0 = tr[0] if isinstance(tr, list) and len(tr) > 0 and isinstance(tr[0], dict) else {}
+
+        treat_count.append(len(tr) if isinstance(tr, list) else 0)
+        treatment_name.append(str(tr0.get("treatment","") or ""))
+        treatment_area.append(str(tr0.get("area","") or ""))
+        treatment_unit.append(str(tr0.get("unit","") or ""))
+
+        ords = tr0.get("order") or []
+        pracs = tr0.get("practice") or []
+        assts = tr0.get("doctor_asst") or []
+
+        # กันกรณีเป็น string/None
+        ords = norm_list(ords) if not isinstance(ords, list) else ords
+        pracs = norm_list(pracs) if not isinstance(pracs, list) else pracs
+        assts = norm_list(assts) if not isinstance(assts, list) else assts
+
+        order_list.append(join_list(ords))
+        practice_list.append(join_list(pracs))
+        asst_list.append(join_list(assts))
+
+        order_count.append(len([x for x in ords if str(x).strip() != ""]))
+        practice_count.append(len([x for x in pracs if str(x).strip() != ""]))
+        asst_count.append(len([x for x in assts if str(x).strip() != ""]))
+
+        # payment_status
+        ps = safe_json_loads(r.get("payment_status"))
+        ps0 = ps[0] if isinstance(ps, list) and len(ps) > 0 and isinstance(ps[0], dict) else {}
+
+        # field ข้างในมักเป็น list เช่น status:["paid"]
+        def first_of(v):
+            if isinstance(v, list) and v:
+                return v[0]
+            return v
+
+        pay_status.append(str(first_of(ps0.get("status")) or ""))
+        pay_invoice_id.append(str(first_of(ps0.get("invoice_id")) or ""))
+        pay_total_invoiced.append(first_of(ps0.get("total_invoiced")))
+        pay_case_type.append(str(first_of(ps0.get("case_type")) or ""))
+        pay_reason_not_insurance.append(str(first_of(ps0.get("reasonNotInsurance")) or ""))
+
+        # rejects
+        rej = safe_json_loads(r.get("rejects"))
+        rej0 = rej[0] if isinstance(rej, list) and len(rej) > 0 and isinstance(rej[0], dict) else {}
+        r_type = str(rej0.get("reject","") or "").strip()
+        r_reason = str(rej0.get("reason","") or "").strip()
+        r_prob = str(rej0.get("problem","") or "").strip()
+
+        has_reject.append(bool(r_type or r_reason or r_prob))
+        reject_type.append(r_type)
+        reject_reason.append(r_reason)
+        reject_problem.append(r_prob)
+
+        # logs (medLog, billLog, retry) เป็น list string
+        ml = safe_json_loads(r.get("medLog"))
+        bl = safe_json_loads(r.get("billLog"))
+        rt = safe_json_loads(r.get("retry"))
+
+        ml_list = ml if isinstance(ml, list) else []
+        bl_list = bl if isinstance(bl, list) else []
+        rt_list = rt if isinstance(rt, list) else []
+
+        medlog_list.append(join_list(ml_list))
+        billlog_list.append(join_list(bl_list))
+        retry_list.append(join_list(rt_list))
+        medlog_count.append(len(ml_list))
+        billlog_count.append(len(bl_list))
+        retry_count.append(len(rt_list))
+
+    # ใส่คอลัมน์ใหม่
+    out["diag_count"] = diag_count
+    out["diag_codes"] = diag_codes
+    out["diag_titles"] = diag_titles
+    out["diag_code_1"] = diag_code_1
+    out["diag_code_2"] = diag_code_2
+    out["diag_code_3"] = diag_code_3
+    out["diag_title_1"] = diag_title_1
+    out["diag_title_2"] = diag_title_2
+    out["diag_title_3"] = diag_title_3
+
+    out["treat_count"] = treat_count
+    out["treatment_name"] = treatment_name
+    out["treatment_area"] = treatment_area
+    out["treatment_unit"] = treatment_unit
+    out["order_list"] = order_list
+    out["practice_list"] = practice_list
+    out["asst_list"] = asst_list
+    out["order_count"] = order_count
+    out["practice_count"] = practice_count
+    out["asst_count"] = asst_count
+
+    out["pay_status"] = pay_status
+    out["pay_invoice_id"] = pay_invoice_id
+    out["pay_total_invoiced"] = pay_total_invoiced
+    out["pay_case_type"] = pay_case_type
+    out["pay_reason_not_insurance"] = pay_reason_not_insurance
+
+    out["has_reject"] = has_reject
+    out["reject_type"] = reject_type
+    out["reject_reason"] = reject_reason
+    out["reject_problem"] = reject_problem
+
+    out["medLog_list"] = medlog_list
+    out["medLog_count"] = medlog_count
+    out["billLog_list"] = billlog_list
+    out["billLog_count"] = billlog_count
+    out["retry_list"] = retry_list
+    out["retry_count"] = retry_count
+
+    return out
+def page_patient_summary_clean_export():
+    st.header("🧹 Patient Summary Clean Export – CSV → Excel (Filter-ready)")
+
+    st.write("""
+อัปโหลดไฟล์ Patient_summary CSV  
+ระบบจะแตกคอลัมน์ JSON/array (diagnosis, treatments, payment_status, rejects) ให้เป็นคอลัมน์ใหม่เพื่อ filter ง่ายใน Excel
+""")
+
+    uploaded = st.file_uploader("Upload Patient_summary CSV", type=["csv"], key="ps_clean_uploader")
+    if uploaded is None:
+        st.info("⬆️ กรุณาอัปโหลดไฟล์ CSV ด้านบน")
+        return
+
+    # อ่านไฟล์
+    try:
+        df_raw = pd.read_csv(uploaded, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        df_raw = pd.read_csv(uploaded, encoding="latin1")
+
+    st.subheader("👀 Preview – Raw (5 แถวแรก)")
+    st.dataframe(df_raw.head())
+
+    df_clean = beautify_patient_summary(df_raw)
+
+    st.subheader("✨ Preview – Clean (10 แถวแรก)")
+    st.dataframe(df_clean.head(10))
+
+    # Export
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df_clean.to_excel(writer, sheet_name="Clean", index=False)
+
+    output.seek(0)
+    st.download_button(
+        label="⬇ Download Patient Summary Clean Excel",
+        data=output.getvalue(),
+        file_name="patient_summary_clean.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_ps_clean_excel"
+    )
 
 # =========================
 # SIDEBAR NAVIGATION
@@ -465,3 +719,5 @@ elif page == "Doctor Round":
     page_doctor_round()
 elif page == "Refer Summary":
     page_refer_summary()
+elif page == "Patient Summary Clean Export":
+    page_patient_summary_clean_export()
