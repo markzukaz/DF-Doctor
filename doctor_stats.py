@@ -492,9 +492,10 @@ def beautify_patient_summary(df: pd.DataFrame) -> pd.DataFrame:
     diag_count = []
     diag_codes = []
     diag_titles = []
+    diag_cats = []
     diag_code_1, diag_code_2, diag_code_3 = [], [], []
     diag_title_1, diag_title_2, diag_title_3 = [], [], []
-
+    diag_cat_1, diag_cat_2, diag_cat_3 = [], [], []
     # ---------- treatments ----------
     # treatments = list of dict (ส่วนใหญ่ list ยาว 1)
     treat_count = []
@@ -538,9 +539,10 @@ def beautify_patient_summary(df: pd.DataFrame) -> pd.DataFrame:
         diag_count.append(len(diag_items))
         codes = [str(x.get("code","")).strip() for x in diag_items if str(x.get("code","")).strip()]
         titles = [str(x.get("title","")).strip() for x in diag_items if str(x.get("title","")).strip()]
+        cats = [str(x.get("categoryLabel","")).strip() for x in diag_items if str(x.get("categoryLabel","")).strip()]
         diag_codes.append(",".join(codes))
         diag_titles.append(",".join(titles))
-
+        diag_cats.append(",".join(cats))
         def pick(arr, i):
             return arr[i] if i < len(arr) else ""
 
@@ -550,6 +552,9 @@ def beautify_patient_summary(df: pd.DataFrame) -> pd.DataFrame:
         diag_title_1.append(pick(titles, 0))
         diag_title_2.append(pick(titles, 1))
         diag_title_3.append(pick(titles, 2))
+        diag_cat_1.append(pick(cats, 0))
+        diag_cat_2.append(pick(cats, 1))
+        diag_cat_3.append(pick(cats, 2))
 
         # treatments
         tr = safe_json_loads(r.get("treatments"))
@@ -631,6 +636,9 @@ def beautify_patient_summary(df: pd.DataFrame) -> pd.DataFrame:
     out["diag_title_1"] = diag_title_1
     out["diag_title_2"] = diag_title_2
     out["diag_title_3"] = diag_title_3
+    out["diag_category1"] = diag_cat_1
+    out["diag_category2"] = diag_cat_2
+    out["diag_category3"] = diag_cat_3
 
     out["treat_count"] = treat_count
     out["treatment_name"] = treatment_name
@@ -639,9 +647,9 @@ def beautify_patient_summary(df: pd.DataFrame) -> pd.DataFrame:
     out["order_list"] = order_list
     out["practice_list"] = practice_list
     out["asst_list"] = asst_list
-    out["order_count"] = order_count
-    out["practice_count"] = practice_count
-    out["asst_count"] = asst_count
+    # out["order_count"] = order_count
+    # out["practice_count"] = practice_count
+    # out["asst_count"] = asst_count
 
     out["pay_status"] = pay_status
     out["pay_invoice_id"] = pay_invoice_id
@@ -655,11 +663,11 @@ def beautify_patient_summary(df: pd.DataFrame) -> pd.DataFrame:
     out["reject_problem"] = reject_problem
 
     out["medLog_list"] = medlog_list
-    out["medLog_count"] = medlog_count
+    # out["medLog_count"] = medlog_count
     out["billLog_list"] = billlog_list
-    out["billLog_count"] = billlog_count
+    # out["billLog_count"] = billlog_count
     out["retry_list"] = retry_list
-    out["retry_count"] = retry_count
+    # out["retry_count"] = retry_count
 
     return out
 def page_patient_summary_clean_export():
@@ -710,7 +718,7 @@ def page_patient_summary_clean_export():
 st.sidebar.title("🧭 เมนู")
 page = st.sidebar.radio(
     "เลือกโปรแกรม",
-    ["Doctor Stats", "Doctor Round", "Refer Summary"]
+    ["Doctor Stats", "Doctor Round", "Refer Summary","Patient Summary Clean Export"]
 )
 
 if page == "Doctor Stats":
