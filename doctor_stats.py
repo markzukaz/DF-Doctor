@@ -4,7 +4,6 @@ import json
 import datetime as dt
 import pytz
 from io import BytesIO
-import xlsxwriter
 # =========================
 # Global Config
 # =========================
