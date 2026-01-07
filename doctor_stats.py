@@ -469,48 +469,96 @@ def page_refer_summary():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="dl_refer_excel"
     )
+# ---------- Time helpers ----------
+def format_time_gmt7(val):
+    """
+    รองรับทั้ง ISO string, timestamp, datetime
+    output: DD/MM/YYYY HH:mm (Asia/Bangkok)
+    """
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    try:
+        ts = pd.to_datetime(val, utc=True, errors="coerce")
+        if pd.isna(ts):
+            # เผื่อเป็น datetime ที่ไม่มี tz
+            ts = pd.to_datetime(val, errors="coerce")
+            if pd.isna(ts):
+                return str(val)
+            # assume local? (fallback)
+            return ts.strftime("%d/%m/%Y %H:%M")
+        ts = ts.tz_convert("Asia/Bangkok")
+        return ts.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return str(val)
+
+def safe_json_loads(v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    if isinstance(v, (list, dict)):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return json.loads(s)
+        except Exception:
+            return None
+    return None
+
+def norm_list(v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return []
+    if isinstance(v, list):
+        return v
+    return [v]
+
+def join_list(v, sep=","):
+    if v is None:
+        return ""
+    if isinstance(v, list):
+        return sep.join([str(x) for x in v if x is not None and str(x).strip() != ""])
+    return str(v)
 # =========================
 # PAGE 4 – Patient Summary Clean Export
 # 
 # =========================
-def beautify_patient_summary(df: pd.DataFrame) -> pd.DataFrame:
+def beautify_patient_summary(
+    df: pd.DataFrame,
+    diag_top_n: int = 10,     # top N diagnosis columns
+    treat_top_n: int = 6      # top N treatments columns
+) -> pd.DataFrame:
     """
-    รับ df raw จาก Patient_summary CSV แล้วคืน df ที่แตกคอลัมน์ให้อ่านง่าย + filter ง่าย
+    - เพิ่ม time (formatted)
+    - diagnosis: ทำทั้ง join string + แตกคอลัมน์แบบ dynamic topN
+    - treatments: ทำทั้ง join string + แตกคอลัมน์แบบ dynamic topN
     """
-    # field หลักที่คุณต้องการ
     base_cols = [
-        "HN","VN","visit_type","patientTitle","patientName","patientAge","nationality",
-        "branch","insurance_name","assist_insurance","concessionType",
-        "diagnosis","medLog","treatments","payment_status","billLog","rejects","retry","note"
+        "time",
+        "HN", "VN", "visit_type", "patientTitle", "patientName", "patientAge", "nationality",
+        "branch", "insurance_name", "assist_insurance", "concessionType",
+        "diagnosis", "medLog", "treatments", "payment_status", "billLog", "rejects", "retry", "note"
     ]
-    # เอาเฉพาะคอลัมน์ที่มีจริง (กันไฟล์บางเวอร์ชันไม่ครบ)
     keep = [c for c in base_cols if c in df.columns]
     out = df[keep].copy()
 
-    # ---------- diagnosis ----------
-    # diagnosis = list of dict
-    diag_count = []
-    diag_codes = []
-    diag_titles = []
-    diag_cats = []
-    diag_code_1, diag_code_2, diag_code_3 = [], [], []
-    diag_title_1, diag_title_2, diag_title_3 = [], [], []
-    diag_cat_1, diag_cat_2, diag_cat_3 = [], [], []
-    # ---------- treatments ----------
-    # treatments = list of dict (ส่วนใหญ่ list ยาว 1)
-    treat_count = []
-    treatment_name = []
-    treatment_area = []
-    treatment_unit = []
-    order_list = []
-    practice_list = []
-    asst_list = []
-    order_count = []
-    practice_count = []
-    asst_count = []
+    # ---------- time ----------
+    if "time" in out.columns:
+        out["time_fmt"] = out["time"].apply(format_time_gmt7)
+    else:
+        out["time_fmt"] = ""
 
-    # ---------- payment_status ----------
-    # payment_status = list of dict (ส่วนใหญ่ list ยาว 1), ภายในหลาย field เป็น list ยาว 1 อีกที
+    # เตรียม list เก็บค่าที่จะใส่กลับเข้า out ทีเดียว
+    diag_count = []
+    diag_join = []
+    diag_codes_join, diag_titles_join, diag_cats_join = [], [], []
+
+    treat_count = []
+    treat_join = []
+    treat_names_join, treat_areas_join, treat_units_join = [], [], []
+    treat_order_join, treat_practice_join, treat_asst_join = [], [], []
+
+    # ---------- payment_status (ของเดิมยังใช้ได้) ----------
     pay_status = []
     pay_invoice_id = []
     pay_total_invoiced = []
@@ -524,73 +572,107 @@ def beautify_patient_summary(df: pd.DataFrame) -> pd.DataFrame:
     reject_problem = []
 
     # ---------- logs ----------
-    medlog_list, medlog_count = [], []
-    billlog_list, billlog_count = [], []
-    retry_list, retry_count = [], []
+    medlog_list = []
+    billlog_list = []
+    retry_list = []
+
+    # เก็บ diagnosis/treatment สำหรับทำ dynamic columns
+    diags_all_rows = []
+    treats_all_rows = []
+
+    def first_of(v):
+        if isinstance(v, list) and v:
+            return v[0]
+        return v
 
     for _, r in out.iterrows():
-        # diagnosis
+        # ===== diagnosis =====
         diag = safe_json_loads(r.get("diagnosis"))
-        if isinstance(diag, list):
-            diag_items = [x for x in diag if isinstance(x, dict)]
-        else:
-            diag_items = []
+        diag_items = [x for x in diag if isinstance(x, dict)] if isinstance(diag, list) else []
+        diags_all_rows.append(diag_items)
 
         diag_count.append(len(diag_items))
-        codes = [str(x.get("code","")).strip() for x in diag_items if str(x.get("code","")).strip()]
-        titles = [str(x.get("title","")).strip() for x in diag_items if str(x.get("title","")).strip()]
-        cats = [str(x.get("categoryLabel","")).strip() for x in diag_items if str(x.get("categoryLabel","")).strip()]
-        diag_codes.append(",".join(codes))
-        diag_titles.append(",".join(titles))
-        diag_cats.append(",".join(cats))
-        def pick(arr, i):
-            return arr[i] if i < len(arr) else ""
 
-        diag_code_1.append(pick(codes, 0))
-        diag_code_2.append(pick(codes, 1))
-        diag_code_3.append(pick(codes, 2))
-        diag_title_1.append(pick(titles, 0))
-        diag_title_2.append(pick(titles, 1))
-        diag_title_3.append(pick(titles, 2))
-        diag_cat_1.append(pick(cats, 0))
-        diag_cat_2.append(pick(cats, 1))
-        diag_cat_3.append(pick(cats, 2))
+        # ทำ join string แบบอ่านง่าย + split ได้
+        diag_parts = []
+        codes, titles, cats = [], [], []
+        for x in diag_items:
+            code = str(x.get("code", "") or "").strip()
+            title = str(x.get("title", "") or "").strip()
+            cat = str(x.get("categoryLabel", "") or "").strip()
 
-        # treatments
+            if code: codes.append(code)
+            if title: titles.append(title)
+            if cat: cats.append(cat)
+
+            # สไตล์เดียวกับ vue: Code:..., Title:...
+            if code or title or cat:
+                seg = []
+                if code:  seg.append(f"Code:{code}")
+                if title: seg.append(f"Title:{title}")
+                if cat:   seg.append(f"Cat:{cat}")
+                diag_parts.append(", ".join(seg))
+
+        diag_join.append(" | ".join(diag_parts))
+        diag_codes_join.append(",".join(codes))
+        diag_titles_join.append(",".join(titles))
+        diag_cats_join.append(",".join(cats))
+
+        # ===== treatments =====
         tr = safe_json_loads(r.get("treatments"))
-        tr0 = tr[0] if isinstance(tr, list) and len(tr) > 0 and isinstance(tr[0], dict) else {}
+        tr_items = [x for x in tr if isinstance(x, dict)] if isinstance(tr, list) else []
+        treats_all_rows.append(tr_items)
 
-        treat_count.append(len(tr) if isinstance(tr, list) else 0)
-        treatment_name.append(str(tr0.get("treatment","") or ""))
-        treatment_area.append(str(tr0.get("area","") or ""))
-        treatment_unit.append(str(tr0.get("unit","") or ""))
+        treat_count.append(len(tr_items))
 
-        ords = tr0.get("order") or []
-        pracs = tr0.get("practice") or []
-        assts = tr0.get("doctor_asst") or []
+        tr_parts = []
+        names, areas, units = [], [], []
+        orders_all, practices_all, assts_all = [], [], []
 
-        # กันกรณีเป็น string/None
-        ords = norm_list(ords) if not isinstance(ords, list) else ords
-        pracs = norm_list(pracs) if not isinstance(pracs, list) else pracs
-        assts = norm_list(assts) if not isinstance(assts, list) else assts
+        for t in tr_items:
+            tname = str(t.get("treatment", "") or "").strip()
+            area  = str(t.get("area", "") or "").strip()
+            unit  = str(t.get("unit", "") or "").strip()
 
-        order_list.append(join_list(ords))
-        practice_list.append(join_list(pracs))
-        asst_list.append(join_list(assts))
+            if tname: names.append(tname)
+            if area:  areas.append(area)
+            if unit:  units.append(unit)
 
-        order_count.append(len([x for x in ords if str(x).strip() != ""]))
-        practice_count.append(len([x for x in pracs if str(x).strip() != ""]))
-        asst_count.append(len([x for x in assts if str(x).strip() != ""]))
+            ords  = norm_list(t.get("order"))
+            pracs = norm_list(t.get("practice"))
+            assts = norm_list(t.get("doctor_asst"))
 
-        # payment_status
+            # รวมเป็น string ราย treatment
+            ord_s  = join_list(ords)
+            prac_s = join_list(pracs)
+            asst_s = join_list(assts)
+
+            if ord_s:  orders_all.append(ord_s)
+            if prac_s: practices_all.append(prac_s)
+            if asst_s: assts_all.append(asst_s)
+
+            # join แบบคล้าย vue (เอาไป split ด้วย | ได้)
+            seg = [
+                f"Treatment:{tname}",
+                f"Area:{area}",
+                f"Unit:{unit}",
+                f"Order:{ord_s}",
+                f"Practice:{prac_s}",
+                f"Asst:{asst_s}",
+            ]
+            tr_parts.append(", ".join([s for s in seg if not s.endswith(":")]))
+
+        treat_join.append(" | ".join([p for p in tr_parts if p.strip()]))
+        treat_names_join.append(",".join(names))
+        treat_areas_join.append(",".join(areas))
+        treat_units_join.append(",".join(units))
+        treat_order_join.append(" | ".join(orders_all))
+        treat_practice_join.append(" | ".join(practices_all))
+        treat_asst_join.append(" | ".join(assts_all))
+
+        # ===== payment_status =====
         ps = safe_json_loads(r.get("payment_status"))
-        ps0 = ps[0] if isinstance(ps, list) and len(ps) > 0 and isinstance(ps[0], dict) else {}
-
-        # field ข้างในมักเป็น list เช่น status:["paid"]
-        def first_of(v):
-            if isinstance(v, list) and v:
-                return v[0]
-            return v
+        ps0 = ps[0] if isinstance(ps, list) and ps and isinstance(ps[0], dict) else {}
 
         pay_status.append(str(first_of(ps0.get("status")) or ""))
         pay_invoice_id.append(str(first_of(ps0.get("invoice_id")) or ""))
@@ -598,19 +680,19 @@ def beautify_patient_summary(df: pd.DataFrame) -> pd.DataFrame:
         pay_case_type.append(str(first_of(ps0.get("case_type")) or ""))
         pay_reason_not_insurance.append(str(first_of(ps0.get("reasonNotInsurance")) or ""))
 
-        # rejects
+        # ===== rejects =====
         rej = safe_json_loads(r.get("rejects"))
-        rej0 = rej[0] if isinstance(rej, list) and len(rej) > 0 and isinstance(rej[0], dict) else {}
-        r_type = str(rej0.get("reject","") or "").strip()
-        r_reason = str(rej0.get("reason","") or "").strip()
-        r_prob = str(rej0.get("problem","") or "").strip()
+        rej0 = rej[0] if isinstance(rej, list) and rej and isinstance(rej[0], dict) else {}
+        r_type = str(rej0.get("reject", "") or "").strip()
+        r_reason = str(rej0.get("reason", "") or "").strip()
+        r_prob = str(rej0.get("problem", "") or "").strip()
 
         has_reject.append(bool(r_type or r_reason or r_prob))
         reject_type.append(r_type)
         reject_reason.append(r_reason)
         reject_problem.append(r_prob)
 
-        # logs (medLog, billLog, retry) เป็น list string
+        # ===== logs =====
         ml = safe_json_loads(r.get("medLog"))
         bl = safe_json_loads(r.get("billLog"))
         rt = safe_json_loads(r.get("retry"))
@@ -622,34 +704,22 @@ def beautify_patient_summary(df: pd.DataFrame) -> pd.DataFrame:
         medlog_list.append(join_list(ml_list))
         billlog_list.append(join_list(bl_list))
         retry_list.append(join_list(rt_list))
-        medlog_count.append(len(ml_list))
-        billlog_count.append(len(bl_list))
-        retry_count.append(len(rt_list))
 
-    # ใส่คอลัมน์ใหม่
+    # ใส่คอลัมน์ join/summarize
     out["diag_count"] = diag_count
-    out["diag_codes"] = diag_codes
-    out["diag_titles"] = diag_titles
-    out["diag_code_1"] = diag_code_1
-    out["diag_code_2"] = diag_code_2
-    out["diag_code_3"] = diag_code_3
-    out["diag_title_1"] = diag_title_1
-    out["diag_title_2"] = diag_title_2
-    out["diag_title_3"] = diag_title_3
-    out["diag_category1"] = diag_cat_1
-    out["diag_category2"] = diag_cat_2
-    out["diag_category3"] = diag_cat_3
+    out["diag_join"] = diag_join
+    out["diag_codes"] = diag_codes_join
+    out["diag_titles"] = diag_titles_join
+    out["diag_categories"] = diag_cats_join
 
     out["treat_count"] = treat_count
-    out["treatment_name"] = treatment_name
-    out["treatment_area"] = treatment_area
-    out["treatment_unit"] = treatment_unit
-    out["order_list"] = order_list
-    out["practice_list"] = practice_list
-    out["asst_list"] = asst_list
-    # out["order_count"] = order_count
-    # out["practice_count"] = practice_count
-    # out["asst_count"] = asst_count
+    out["treat_join"] = treat_join
+    out["treat_names"] = treat_names_join
+    out["treat_areas"] = treat_areas_join
+    out["treat_units"] = treat_units_join
+    out["treat_orders"] = treat_order_join
+    out["treat_practices"] = treat_practice_join
+    out["treat_assts"] = treat_asst_join
 
     out["pay_status"] = pay_status
     out["pay_invoice_id"] = pay_invoice_id
@@ -663,11 +733,53 @@ def beautify_patient_summary(df: pd.DataFrame) -> pd.DataFrame:
     out["reject_problem"] = reject_problem
 
     out["medLog_list"] = medlog_list
-    # out["medLog_count"] = medlog_count
     out["billLog_list"] = billlog_list
-    # out["billLog_count"] = billlog_count
     out["retry_list"] = retry_list
-    # out["retry_count"] = retry_count
+
+    # ---------- Dynamic TOP-N columns ----------
+    # diagnosis: diag_code_1..N, diag_title_1..N, diag_category_1..N
+    n_diag = min(diag_top_n, max([len(x) for x in diags_all_rows] or [0]))
+    for i in range(n_diag):
+        out[f"diag_code_{i+1}"] = [
+            str(items[i].get("code", "") or "").strip() if i < len(items) else ""
+            for items in diags_all_rows
+        ]
+        out[f"diag_title_{i+1}"] = [
+            str(items[i].get("title", "") or "").strip() if i < len(items) else ""
+            for items in diags_all_rows
+        ]
+        out[f"diag_category_{i+1}"] = [
+            str(items[i].get("categoryLabel", "") or "").strip() if i < len(items) else ""
+            for items in diags_all_rows
+        ]
+
+    # treatments: treat_name_1..N, treat_area_1..N, treat_unit_1..N, treat_order_1..N, treat_practice_1..N
+    n_treat = min(treat_top_n, max([len(x) for x in treats_all_rows] or [0]))
+    for i in range(n_treat):
+        out[f"treat_name_{i+1}"] = [
+            str(items[i].get("treatment", "") or "").strip() if i < len(items) else ""
+            for items in treats_all_rows
+        ]
+        out[f"treat_area_{i+1}"] = [
+            str(items[i].get("area", "") or "").strip() if i < len(items) else ""
+            for items in treats_all_rows
+        ]
+        out[f"treat_unit_{i+1}"] = [
+            str(items[i].get("unit", "") or "").strip() if i < len(items) else ""
+            for items in treats_all_rows
+        ]
+        out[f"treat_order_{i+1}"] = [
+            join_list(norm_list(items[i].get("order"))) if i < len(items) else ""
+            for items in treats_all_rows
+        ]
+        out[f"treat_practice_{i+1}"] = [
+            join_list(norm_list(items[i].get("practice"))) if i < len(items) else ""
+            for items in treats_all_rows
+        ]
+        out[f"treat_asst_{i+1}"] = [
+            join_list(norm_list(items[i].get("doctor_asst"))) if i < len(items) else ""
+            for items in treats_all_rows
+        ]
 
     return out
 def page_patient_summary_clean_export():
